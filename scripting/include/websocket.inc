@@ -44,9 +44,10 @@ functag WebsocketCloseCB public(WebsocketHandle:websocket);
  * @param Handle	newWebsocket	The websocket handle to the newly spawned child socket
  * @param String	remoteIP		The remote IP
  * @param cell_t	remotePort	The remote port
+ * @param String	protocols 	The subprotocols the client supports seperated by commas. You have to choose one of the list, so "protocols" is only that one protocol.
  * @noreturn
  */
-functag WebsocketIncomingCB Action:public(WebsocketHandle:websocket, WebsocketHandle:newWebsocket, const String:remoteIP[], remotePort);
+functag WebsocketIncomingCB Action:public(WebsocketHandle:websocket, WebsocketHandle:newWebsocket, const String:remoteIP[], remotePort, String:protocols[256]);
 
 /**
  * triggered if a websocket receives data
@@ -104,6 +105,16 @@ native WebsocketHandle:Websocket_Open(const String:sHostName[], iPort, Websocket
 native bool:Websocket_HookChild(WebsocketHandle:childwebsocket, WebsocketReceiveCB:recv, WebsocketDisconnectCB:disc, WebsocketErrorCB:we);
 
 /**
+ * Hooks child socket's readystate changes
+ *
+ * @param childwebsocket    The child websocket to hook.
+ * @param readystate   			ReadyState change callback
+ * @return        			True if child socket was hooked, false otherwise
+ */
+native bool:Websocket_HookReadyStateChange(WebsocketHandle:childwebsocket, WebsocketReadyStateChangedCB:readystate);
+
+
+/**
  * Sends text or binary data through the websocket
  *
  * @param childwebsocket    The child websocket to send to
@@ -156,6 +167,7 @@ public SharedPlugin:__pl_websocket =
 public __pl_websocket_SetNTVOptional()
 {
 	MarkNativeAsOptional("Websocket_Open");
+	MarkNativeAsOptional("Websocket_HookReadyStateChange");
 	MarkNativeAsOptional("Websocket_HookChild");
 	MarkNativeAsOptional("Websocket_Send");
 	MarkNativeAsOptional("Websocket_GetReadyState");

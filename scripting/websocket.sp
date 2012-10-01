@@ -7,7 +7,7 @@
 #include <base64>
 #include <sha1>
 
-#define PLUGIN_VERSION "1.0"
+#define PLUGIN_VERSION "1.1"
 
 #define DEBUG 0
 #if DEBUG > 0
@@ -29,10 +29,12 @@ new String:g_sLog[PLATFORM_MAX_PATH];
 #define CHILD_RECVCALL 1
 #define CHILD_DISCCALL 2
 #define CHILD_ERRCALL 3
+#define CHILD_READYSTATECALL 4
+#define CHILD_ARRAY_LENGTH 5
 
 // Handshake header parsing
 new Handle:g_hRegExKey;
-new Handle:g_hRegExVersion;
+new Handle:g_hRegExProtocol;
 
 // Array of all master sockets we're listening on
 new Handle:g_hMasterSockets;
@@ -56,6 +58,8 @@ new Handle:g_hChildSocketReadyState;
 new Handle:g_hChildErrorForwards;
 new Handle:g_hChildReceiveForwards;
 new Handle:g_hChildDisconnectForwards;
+new Handle:g_hChildReadyStateChangeForwards;
+//new Handle:g_hChildRandomParameter;
 
 // This is passed as "handle" to plugins
 new g_iLastSocketIndex = 0;
@@ -96,6 +100,7 @@ public APLRes:AskPluginLoad2(Handle:myself, bool:late, String:error[], err_max)
 	RegPluginLibrary("websocket");
 	CreateNative("Websocket_Open", Native_Websocket_Open);
 	CreateNative("Websocket_HookChild", Native_Websocket_HookChild);
+	CreateNative("Websocket_HookReadyStateChange", Native_Websocket_HookReadyStateChange);
 	CreateNative("Websocket_GetReadyState", Native_Websocket_GetReadyState);
 	CreateNative("Websocket_Send", Native_Websocket_Send);
 	CreateNative("Websocket_UnhookChild", Native_Websocket_UnhookChild);
@@ -116,10 +121,10 @@ public OnPluginStart()
 	{
 		SetFailState("Can't compile Sec-WebSocket-Key regex: %s (%d)", sError, _:iRegExError);
 	}
-	g_hRegExVersion = CompileRegex("Sec-WebSocket-Version: (.*)\r\n", 0, sError, sizeof(sError), iRegExError);
-	if(g_hRegExVersion == INVALID_HANDLE)
+	g_hRegExProtocol = CompileRegex("Sec-WebSocket-Protocol: (.*)\r\n", 0, sError, sizeof(sError), iRegExError);
+	if(g_hRegExProtocol == INVALID_HANDLE)
 	{
-		SetFailState("Can't compile Sec-WebSocket-Version regex: %s (%d)", sError, _:iRegExError);
+		SetFailState("Can't compile Sec-WebSocket-Protocol regex: %s (%d)", sError, _:iRegExError);
 	}
 	
 	g_hMasterSockets = CreateArray();
@@ -140,6 +145,7 @@ public OnPluginStart()
 	g_hChildErrorForwards = CreateArray();
 	g_hChildReceiveForwards = CreateArray();
 	g_hChildDisconnectForwards = CreateArray();
+	g_hChildReadyStateChangeForwards = CreateArray();
 	
 #if DEBUG > 0
 	BuildPath(Path_SM, g_sLog, sizeof(g_sLog), "logs/websocket_debug.log");
@@ -148,9 +154,8 @@ public OnPluginStart()
 
 public OnPluginEnd()
 {
-	new iSize = GetArraySize(g_hMasterSockets);
-	for(new i=0;i<iSize;i++)
-		CloseMasterSocket(i);
+	while(GetArraySize(g_hMasterSockets))
+		CloseMasterSocket(0);
 }
 
 public Native_Websocket_Open(Handle:plugin, numParams)
@@ -235,7 +240,7 @@ public Native_Websocket_Open(Handle:plugin, numParams)
 		iPseudoHandle = ++g_iLastSocketIndex;
 		PushArrayCell(g_hMasterSocketIndexes, iPseudoHandle);
 		// Create private forwards for this socket
-		hIncomingForward = CreateForward(ET_Event, Param_Cell, Param_Cell, Param_String, Param_Cell);
+		hIncomingForward = CreateForward(ET_Event, Param_Cell, Param_Cell, Param_String, Param_Cell, Param_String);
 		PushArrayCell(g_hMasterIncomingForwards, hIncomingForward);
 		hErrorForward = CreateForward(ET_Ignore, Param_Cell, Param_Cell, Param_Cell);
 		PushArrayCell(g_hMasterErrorForwards, hErrorForward);
@@ -337,34 +342,107 @@ public Native_Websocket_HookChild(Handle:plugin, numParams)
 	// Did this plugin already hook the child socket? Replace callbacks!
 	new Handle:hChildSocketPlugin = Handle:GetArrayCell(g_hChildSocketPlugins, iChildIndex);
 	new iPluginCount = GetArraySize(hChildSocketPlugin);
-	new aPluginInfo[4];
+	new any:aPluginInfo[CHILD_ARRAY_LENGTH];
+	new iPluginInfoIndex = -1;
 	for(new p=0;p<iPluginCount;p++)
 	{
-		GetArrayArray(hChildSocketPlugin, p, aPluginInfo, 4);
+		GetArrayArray(hChildSocketPlugin, p, aPluginInfo, CHILD_ARRAY_LENGTH);
 		if(plugin == Handle:aPluginInfo[CHILD_PLUGINHANDLE])
 		{
-			RemoveFromForward(hReceiveForward, Handle:aPluginInfo[CHILD_PLUGINHANDLE], Function:aPluginInfo[CHILD_RECVCALL]);
-			RemoveFromForward(hDisconnectForward, Handle:aPluginInfo[CHILD_PLUGINHANDLE], Function:aPluginInfo[CHILD_DISCCALL]);
-			RemoveFromForward(hErrorForward, Handle:aPluginInfo[CHILD_PLUGINHANDLE], Function:aPluginInfo[CHILD_ERRCALL]);
-			break;
+			iPluginInfoIndex = p;
+			// Only remove, if there are already callbacks set. This could happen, if ReadyStateChange was called before HookChild.
+			if(Function:aPluginInfo[CHILD_RECVCALL] != INVALID_FUNCTION)
+			{
+				RemoveFromForward(hReceiveForward, Handle:aPluginInfo[CHILD_PLUGINHANDLE], Function:aPluginInfo[CHILD_RECVCALL]);
+				RemoveFromForward(hDisconnectForward, Handle:aPluginInfo[CHILD_PLUGINHANDLE], Function:aPluginInfo[CHILD_DISCCALL]);
+				RemoveFromForward(hErrorForward, Handle:aPluginInfo[CHILD_PLUGINHANDLE], Function:aPluginInfo[CHILD_ERRCALL]);
+				break;
+			}
 		}
 	}
 	
-	// Store this plugin's callbacks to be able to remove them from the forward by the time the child socket disconnects
-	aPluginInfo[CHILD_PLUGINHANDLE] = _:plugin;
 	aPluginInfo[CHILD_RECVCALL] = GetNativeCell(2);
 	aPluginInfo[CHILD_DISCCALL] = GetNativeCell(3);
 	aPluginInfo[CHILD_ERRCALL] = GetNativeCell(4);
 	
-	PushArrayArray(hChildSocketPlugin, aPluginInfo, 4);
+	// This is the first call to a hooking function on this socket for this plugin.
+	if(iPluginInfoIndex == -1)
+	{
+		// Store this plugin's callbacks to be able to remove them from the forward by the time the child socket disconnects
+		aPluginInfo[CHILD_PLUGINHANDLE] = _:plugin;
+		aPluginInfo[CHILD_READYSTATECALL] = _:INVALID_FUNCTION;
+		
+		PushArrayArray(hChildSocketPlugin, aPluginInfo, CHILD_ARRAY_LENGTH);
+	// This plugin is already known.
+	} else {
+		SetArrayArray(hChildSocketPlugin, iPluginInfoIndex, aPluginInfo, CHILD_ARRAY_LENGTH);
+	}
 	
 	// Add his callbacks to the private forwards
 	if(!AddToForward(hReceiveForward, Handle:aPluginInfo[CHILD_PLUGINHANDLE], Function:aPluginInfo[CHILD_RECVCALL]))
-		PrintToServer("Unable to add plugin to recv callback");
+		LogError("Unable to add plugin to recv callback");
 	if(!AddToForward(hDisconnectForward, Handle:aPluginInfo[CHILD_PLUGINHANDLE], Function:aPluginInfo[CHILD_DISCCALL]))
-		PrintToServer("Unable to add plugin to disc callback");
+		LogError("Unable to add plugin to disc callback");
 	if(!AddToForward(hErrorForward, Handle:aPluginInfo[CHILD_PLUGINHANDLE], Function:aPluginInfo[CHILD_ERRCALL]))
-		PrintToServer("Unable to add plugin to err callback");
+		LogError("Unable to add plugin to err callback");
+	
+	return true;
+}
+
+// Return the ready state of a child socket
+public Native_Websocket_HookReadyStateChange(Handle:plugin, numParams)
+{
+	new WebsocketHandle:iPseudoChildHandle = WebsocketHandle:GetNativeCell(1);
+	new iChildIndex;
+	if(iPseudoChildHandle == INVALID_WEBSOCKET_HANDLE
+	|| (iChildIndex = FindValueInArray(g_hChildSocketIndexes, _:iPseudoChildHandle)) == -1)
+	{
+		ThrowNativeError(SP_ERROR_NATIVE, "Invalid child websocket handle.");
+		return false;
+	}
+	
+	new Handle:hReadyStateChangeForward = Handle:GetArrayCell(g_hChildReadyStateChangeForwards, iChildIndex);
+	
+	// Check, if this plugin already hooked this socket.
+	new Handle:hChildSocketPlugin = Handle:GetArrayCell(g_hChildSocketPlugins, iChildIndex);
+	new iPluginCount = GetArraySize(hChildSocketPlugin);
+	new any:aPluginInfo[CHILD_ARRAY_LENGTH];
+	new iPluginInfoIndex = -1;
+	for(new p=0;p<iPluginCount;p++)
+	{
+		GetArrayArray(hChildSocketPlugin, p, aPluginInfo, CHILD_ARRAY_LENGTH);
+		if(plugin == Handle:aPluginInfo[CHILD_PLUGINHANDLE])
+		{
+			iPluginInfoIndex = p;
+			// Replace the callback, if we already stored one.
+			if(Function:aPluginInfo[CHILD_READYSTATECALL] != INVALID_FUNCTION)
+			{
+				RemoveFromForward(hReadyStateChangeForward, Handle:aPluginInfo[CHILD_PLUGINHANDLE], Function:aPluginInfo[CHILD_READYSTATECALL]);
+				break;
+			}
+		}
+	}
+	
+	// Save the function to call.
+	aPluginInfo[CHILD_READYSTATECALL] = Function:GetNativeCell(2);
+	
+	// This is the first call for a plugin to call a hooking function.
+	if(iPluginInfoIndex == -1)
+	{
+		aPluginInfo[CHILD_PLUGINHANDLE] = _:plugin;
+		aPluginInfo[CHILD_RECVCALL] = _:INVALID_FUNCTION;
+		aPluginInfo[CHILD_ERRCALL] = _:INVALID_FUNCTION;
+		aPluginInfo[CHILD_DISCCALL] = _:INVALID_FUNCTION;
+		
+		PushArrayArray(hChildSocketPlugin, aPluginInfo, CHILD_ARRAY_LENGTH);
+	}
+	else
+	{
+		SetArrayArray(hChildSocketPlugin, iPluginInfoIndex, aPluginInfo, CHILD_ARRAY_LENGTH);
+	}
+	
+	if(!AddToForward(hReadyStateChangeForward, Handle:aPluginInfo[CHILD_PLUGINHANDLE], Function:aPluginInfo[CHILD_READYSTATECALL]))
+		LogError("Unable to add plugin to readystate change callback");
 	
 	return true;
 }
@@ -398,19 +476,26 @@ public Native_Websocket_UnhookChild(Handle:plugin, numParams)
 	new Handle:hReceiveForward = Handle:GetArrayCell(g_hChildReceiveForwards, iChildIndex);
 	new Handle:hDisconnectForward = Handle:GetArrayCell(g_hChildDisconnectForwards, iChildIndex);
 	new Handle:hErrorForward = Handle:GetArrayCell(g_hChildErrorForwards, iChildIndex);
+	new Handle:hReadyStateChangeForward = Handle:GetArrayCell(g_hChildReadyStateChangeForwards, iChildIndex);
 	
 	new Handle:hChildSocketPlugin = GetArrayCell(g_hChildSocketPlugins, iChildIndex);
 	new iPluginCount = GetArraySize(hChildSocketPlugin);
-	new aPluginInfo[4];
+	new aPluginInfo[CHILD_ARRAY_LENGTH];
 	for(new p=0;p<iPluginCount;p++)
 	{
-		GetArrayArray(hChildSocketPlugin, p, aPluginInfo, 4);
+		GetArrayArray(hChildSocketPlugin, p, aPluginInfo, CHILD_ARRAY_LENGTH);
 		if(Handle:aPluginInfo[CHILD_PLUGINHANDLE] == plugin)
 		{
 			// Remove the caller from all forwards
-			RemoveFromForward(hReceiveForward, Handle:aPluginInfo[CHILD_PLUGINHANDLE], Function:aPluginInfo[CHILD_RECVCALL]);
-			RemoveFromForward(hDisconnectForward, Handle:aPluginInfo[CHILD_PLUGINHANDLE], Function:aPluginInfo[CHILD_DISCCALL]);
-			RemoveFromForward(hErrorForward, Handle:aPluginInfo[CHILD_PLUGINHANDLE], Function:aPluginInfo[CHILD_ERRCALL]);
+			if(Function:aPluginInfo[CHILD_RECVCALL] != INVALID_FUNCTION)
+			{
+				RemoveFromForward(hReceiveForward, Handle:aPluginInfo[CHILD_PLUGINHANDLE], Function:aPluginInfo[CHILD_RECVCALL]);
+				RemoveFromForward(hDisconnectForward, Handle:aPluginInfo[CHILD_PLUGINHANDLE], Function:aPluginInfo[CHILD_DISCCALL]);
+				RemoveFromForward(hErrorForward, Handle:aPluginInfo[CHILD_PLUGINHANDLE], Function:aPluginInfo[CHILD_ERRCALL]);
+			}
+			// Did this plugin call Websocket_HookReadyStateChange?
+			if(Function:aPluginInfo[CHILD_READYSTATECALL] != INVALID_FUNCTION)
+				RemoveFromForward(hReadyStateChangeForward, Handle:aPluginInfo[CHILD_PLUGINHANDLE], Function:aPluginInfo[CHILD_READYSTATECALL]);
 			RemoveFromArray(hChildSocketPlugin, p);
 			break;
 		}
@@ -462,15 +547,9 @@ CloseMasterSocket(iIndex, bool:bError = false, errorType=-1, errorNum=-1)
 			CloseConnection(i, 1001, "");
 	}
 	
-	// Loop through all plugins using this socket
-	new Handle:hPlugins = GetArrayCell(g_hMasterSocketPlugins, iIndex);
-	new iPluginCount = GetArraySize(hPlugins);
-	new aPluginInfo[4];
-	// This master socket is gone, inform plugins and remove forward
-	for(new p=0;p<iPluginCount;p++)
+	// Only bother notifying other plugins, if there are still any listening at all.
+	if(GetForwardFunctionCount(hIncomingForward) > 0)
 	{
-		GetArrayArray(hPlugins, p, aPluginInfo, 4);
-		
 		// There's been an error.
 		if(bError)
 		{
@@ -479,6 +558,7 @@ CloseMasterSocket(iIndex, bool:bError = false, errorType=-1, errorNum=-1)
 			Call_PushCell(WebsocketHandle:iPseudoHandle);
 			Call_PushCell(errorType);
 			Call_PushCell(errorNum);
+			Call_PushCell(0); // Dummy value as the master socket doesn't use the any:data paramter.
 			Call_Finish();
 		}
 		else
@@ -488,15 +568,30 @@ CloseMasterSocket(iIndex, bool:bError = false, errorType=-1, errorNum=-1)
 			Call_Finish();
 		}
 		
-		// Remove it from forwards.
-		RemoveFromForward(hErrorForward, Handle:aPluginInfo[PLUGIN_HANDLE], Function:aPluginInfo[PLUGIN_ERRORCALLBACK]);
-		RemoveFromForward(hIncomingForward, Handle:aPluginInfo[PLUGIN_HANDLE], Function:aPluginInfo[PLUGIN_INCOMINGCALLBACK]);
-		RemoveFromForward(hCloseForward, Handle:aPluginInfo[PLUGIN_HANDLE], Function:aPluginInfo[PLUGIN_CLOSECALLBACK]);
+		// Loop through all plugins using this socket
+		new Handle:hPlugins = GetArrayCell(g_hMasterSocketPlugins, iIndex);
+		new iPluginCount = GetArraySize(hPlugins);
+		new aPluginInfo[4];
+		// This master socket is gone, remove forward
+		for(new p=0;p<iPluginCount;p++)
+		{
+			GetArrayArray(hPlugins, p, aPluginInfo, 4);
+			
+			if(!IsPluginStillLoaded(Handle:aPluginInfo[PLUGIN_HANDLE]))
+				continue;
+			
+			// Remove it from forwards.
+			RemoveFromForward(hErrorForward, Handle:aPluginInfo[PLUGIN_HANDLE], Function:aPluginInfo[PLUGIN_ERRORCALLBACK]);
+			RemoveFromForward(hIncomingForward, Handle:aPluginInfo[PLUGIN_HANDLE], Function:aPluginInfo[PLUGIN_INCOMINGCALLBACK]);
+			RemoveFromForward(hCloseForward, Handle:aPluginInfo[PLUGIN_HANDLE], Function:aPluginInfo[PLUGIN_CLOSECALLBACK]);
+		}
+		CloseHandle(hPlugins);
 	}
-	CloseHandle(hPlugins);
+	
 	RemoveFromArray(g_hMasterSocketPlugins, iIndex);
 	CloseHandle(hErrorForward);
 	CloseHandle(hIncomingForward);
+	CloseHandle(hCloseForward);
 	RemoveFromArray(g_hMasterErrorForwards, iIndex);
 	RemoveFromArray(g_hMasterIncomingForwards, iIndex);
 	RemoveFromArray(g_hMasterCloseForwards, iIndex);
@@ -524,57 +619,40 @@ public OnSocketIncoming(Handle:socket, Handle:newSocket, const String:remoteIP[]
 	SocketSetDisconnectCallback(newSocket, OnChildSocketDisconnect);
 	SocketSetErrorCallback(newSocket, OnChildSocketError);
 	
-	new iPseudoHandle = GetArrayCell(g_hMasterSocketIndexes, iIndex);
 	new iPseudoChildHandle = ++g_iLastSocketIndex;
 	new Handle:hIncomingForward = GetArrayCell(g_hMasterIncomingForwards, iIndex);
+	
+	// There are no plugins listening anymore?! They didn't call WebSocket_Close in OnPluginEnd.
+	if(!GetForwardFunctionCount(hIncomingForward))
+	{
+		CloseHandle(newSocket);
+		CloseMasterSocket(iIndex);
+		return;
+	}
 	
 	SocketSetArg(newSocket, iPseudoChildHandle);
 	
 	// Save this connection in our arrays
-	new iChildIndex = PushArrayCell(g_hChildSockets, newSocket);
+	PushArrayCell(g_hChildSockets, newSocket);
 	// Make sure we remember the master socket!
 	PushArrayCell(g_hChildsMasterSockets, iIndex);
 	PushArrayCell(g_hChildSocketIndexes, iPseudoChildHandle);
 	PushArrayString(g_hChildSocketHost, remoteIP);
 	PushArrayCell(g_hChildSocketPort, remotePort);
-	PushArrayCell(g_hChildSocketPlugins, CreateArray(4));
+	PushArrayCell(g_hChildSocketPlugins, CreateArray(CHILD_ARRAY_LENGTH));
 	PushArrayCell(g_hChildSocketReadyState, State_Connecting);
 	
 	// Create the private forwards for this socket
-	new Handle:hReceiveForward = CreateForward(ET_Ignore, Param_Cell, Param_Cell, Param_String, Param_Cell);
+	new Handle:hReceiveForward = CreateForward(ET_Ignore, Param_Cell, Param_Cell, Param_String, Param_Cell, Param_Any);
 	PushArrayCell(g_hChildReceiveForwards, hReceiveForward);
-	new Handle:hErrorForward = CreateForward(ET_Ignore, Param_Cell, Param_Cell, Param_Cell);
+	new Handle:hErrorForward = CreateForward(ET_Ignore, Param_Cell, Param_Cell, Param_Cell, Param_Any);
 	PushArrayCell(g_hChildErrorForwards, hErrorForward);
-	new Handle:hDisconnectForward = CreateForward(ET_Ignore, Param_Cell);
+	new Handle:hDisconnectForward = CreateForward(ET_Ignore, Param_Cell, Param_Any);
 	PushArrayCell(g_hChildDisconnectForwards, hDisconnectForward);
+	new Handle:hReadyStateChangeForward = CreateForward(ET_Ignore, Param_Cell, Param_Cell, Param_Any);
+	PushArrayCell(g_hChildReadyStateChangeForwards, hReadyStateChangeForward);
 	
-	Call_StartForward(hIncomingForward);
-	Call_PushCell(WebsocketHandle:iPseudoHandle);
-	Call_PushCell(WebsocketHandle:iPseudoChildHandle);
-	Call_PushString(remoteIP);
-	Call_PushCell(remotePort);
-	
-	new Action:iResult;
-	Call_Finish(iResult);
-	// Someone doesn't like this connection..
-	if(iResult >= Plugin_Handled)
-	{
-		Debug(1, "IncomingForward is >= Plugin_Handled. Closing child socket.");
-		// Uhm.. Just because of that one? plugin denying the connection, we need to revert any Websocket_HookChild call..
-		CloseChildSocket(iChildIndex);
-		
-		return;
-	}
-	
-	// Check if any plugin called Websocket_HookChild and close the socket, if not.
-	new Handle:hChildSocketPlugins = GetArrayCell(g_hChildSocketPlugins, iChildIndex);
-	if(GetArraySize(hChildSocketPlugins) == 0)
-	{
-		Debug(1, "No plugin hooked the new child socket. Closing child socket.");
-		CloseChildSocket(iChildIndex);
-		
-		return;
-	}
+	// TODO start a timouttimer which closes the connection, if no valid http upgrade request is received in time.
 }
 
 public OnChildSocketError(Handle:socket, const errorType, const errorNum, any:arg)
@@ -656,14 +734,86 @@ public OnChildSocketReceive(Handle:socket, const String:receiveData[], const dat
 			
 			Debug(2, "ResponseKey: %s", sResponseKey);
 			
+			iSubStrings = MatchRegex(g_hRegExProtocol, receiveData, iRegexError);
+			new String:sProtocol[256];
+			if(iSubStrings != -1)
+			{
+				if(!GetRegexSubString(g_hRegExProtocol, 1, sProtocol, sizeof(sProtocol)))
+				{
+					Format(sProtocol, sizeof(sProtocol), "");
+					// It's not required to specify a subprotocol!
+					/*LogError("Failed to extract sub protocols.");
+					CloseChildSocket(iIndex);
+					return;*/
+				}
+			}
+			
+			// Inform plugins, there's an incoming request 
+			new iMasterIndex = GetArrayCell(g_hChildsMasterSockets, iIndex);
+			
+			new Handle:hIncomingForward = GetArrayCell(g_hMasterIncomingForwards, iMasterIndex);
+			Call_StartForward(hIncomingForward);
+			Call_PushCell(WebsocketHandle:GetArrayCell(g_hMasterSocketIndexes, iMasterIndex));
+			Call_PushCell(WebsocketHandle:GetArrayCell(g_hChildSocketIndexes, iIndex));
+			decl String:remoteIP[65];
+			GetArrayString(g_hChildSocketHost, iIndex, remoteIP, sizeof(remoteIP));
+			Call_PushString(remoteIP);
+			Call_PushCell(GetArrayCell(g_hChildSocketPort, iIndex));
+			// TODO SM_PARAM_STRING_UTF8 might be wrong here? SM_PARAM_STRING_COPY?
+			new String:sProtocolReturn[256];
+			strcopy(sProtocolReturn, sizeof(sProtocolReturn), sProtocol);
+			Call_PushStringEx(sProtocolReturn, sizeof(sProtocolReturn), SM_PARAM_STRING_UTF8, SM_PARAM_COPYBACK);
+			
+			new Action:iResult;
+			Call_Finish(iResult);
+			
+			// TODO be more friendly in refusing connections by sending a proper http header.
+			// Someone doesn't like this connection..
+			if(iResult >= Plugin_Handled)
+			{
+				Debug(1, "IncomingForward is >= Plugin_Handled. Closing child socket.");
+				// Uhm.. Just because of that one? plugin denying the connection, we need to revert any Websocket_HookChild call..
+				CloseChildSocket(iIndex);
+				
+				return;
+			}
+			
+			// Check if any plugin called Websocket_HookChild and close the socket, if not.
+			new Handle:hChildSocketPlugins = GetArrayCell(g_hChildSocketPlugins, iIndex);
+			if(GetArraySize(hChildSocketPlugins) == 0)
+			{
+				Debug(1, "No plugin hooked the new child socket. Closing child socket.");
+				CloseChildSocket(iIndex);
+				
+				return;
+			}
+			
+			// Make sure the server offered this protocol the plugin chose.
+			// Should probably error out here?
+			if(StrContains(sProtocol, sProtocolReturn) == -1)
+			{
+				Debug(1, "Plugin chose non-existant subprotocol. Offered: \"%s\" - Chosen: \"%s\"", sProtocol, sProtocolReturn);
+				Format(sProtocolReturn, sizeof(sProtocolReturn), "");
+			}
+			else
+				Format(sProtocolReturn, sizeof(sProtocolReturn), "\r\nSec-Websocket-Protocol: %s", sProtocol);
+			
 			// Prepare HTTP request
 			decl String:sHTTPRequest[512];
-			Format(sHTTPRequest, sizeof(sHTTPRequest), "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: %s\r\n\r\n", sResponseKey);
+			Format(sHTTPRequest, sizeof(sHTTPRequest), "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: %s%s\r\n\r\n", sResponseKey, sProtocolReturn);
 			SocketSend(socket, sHTTPRequest);
 			
 			Debug(2, "Responding: %s", sHTTPRequest);
 			
 			SetArrayCell(g_hChildSocketReadyState, iIndex, State_Open);
+			
+			// Inform the other plugins of the change.
+			new Handle:hReadyStateChangeForward = GetArrayCell(g_hChildReadyStateChangeForwards, iIndex);
+			
+			Call_StartForward(hReadyStateChangeForward);
+			Call_PushCell(WebsocketHandle:GetArrayCell(g_hChildSocketIndexes, iIndex));
+			Call_PushCell(GetArrayCell(g_hChildSocketReadyState, iIndex));
+			Call_Finish();
 		}
 		// We're open to receive info! Parse the input.
 		case State_Open:
@@ -698,6 +848,7 @@ CloseChildSocket(iChildIndex, bool:bFireForward=true)
 	new Handle:hReceiveForward = Handle:GetArrayCell(g_hChildReceiveForwards, iChildIndex);
 	new Handle:hDisconnectForward = Handle:GetArrayCell(g_hChildDisconnectForwards, iChildIndex);
 	new Handle:hErrorForward = Handle:GetArrayCell(g_hChildErrorForwards, iChildIndex);
+	new Handle:hReadyStateChangeForward = Handle:GetArrayCell(g_hChildReadyStateChangeForwards, iChildIndex);
 	
 	if(bFireForward)
 	{
@@ -715,15 +866,22 @@ CloseChildSocket(iChildIndex, bool:bFireForward=true)
 	RemoveFromArray(g_hChildSocketReadyState, iChildIndex);
 	new Handle:hChildSocketPlugin = GetArrayCell(g_hChildSocketPlugins, iChildIndex);
 	new iPluginCount = GetArraySize(hChildSocketPlugin);
-	new aPluginInfo[4];
+	new aPluginInfo[CHILD_ARRAY_LENGTH];
 	for(new p=0;p<iPluginCount;p++)
 	{
-		GetArrayArray(hChildSocketPlugin, p, aPluginInfo, 4);
+		GetArrayArray(hChildSocketPlugin, p, aPluginInfo, CHILD_ARRAY_LENGTH);
 		if(!IsPluginStillLoaded(Handle:aPluginInfo[CHILD_PLUGINHANDLE]))
 			continue;
-		RemoveFromForward(hReceiveForward, Handle:aPluginInfo[CHILD_PLUGINHANDLE], Function:aPluginInfo[CHILD_RECVCALL]);
-		RemoveFromForward(hDisconnectForward, Handle:aPluginInfo[CHILD_PLUGINHANDLE], Function:aPluginInfo[CHILD_DISCCALL]);
-		RemoveFromForward(hErrorForward, Handle:aPluginInfo[CHILD_PLUGINHANDLE], Function:aPluginInfo[CHILD_ERRCALL]);
+		if(Function:aPluginInfo[CHILD_RECVCALL] != INVALID_FUNCTION)
+		{
+			RemoveFromForward(hReceiveForward, Handle:aPluginInfo[CHILD_PLUGINHANDLE], Function:aPluginInfo[CHILD_RECVCALL]);
+			RemoveFromForward(hDisconnectForward, Handle:aPluginInfo[CHILD_PLUGINHANDLE], Function:aPluginInfo[CHILD_DISCCALL]);
+			RemoveFromForward(hErrorForward, Handle:aPluginInfo[CHILD_PLUGINHANDLE], Function:aPluginInfo[CHILD_ERRCALL]);
+		}
+		if(Function:aPluginInfo[CHILD_READYSTATECALL] != INVALID_FUNCTION)
+		{
+			RemoveFromForward(hReadyStateChangeForward, Handle:aPluginInfo[CHILD_PLUGINHANDLE], Function:aPluginInfo[CHILD_READYSTATECALL]);
+		}
 	}
 	CloseHandle(hChildSocketPlugin);
 	RemoveFromArray(g_hChildSocketPlugins, iChildIndex);
@@ -732,10 +890,12 @@ CloseChildSocket(iChildIndex, bool:bFireForward=true)
 	CloseHandle(hReceiveForward);
 	CloseHandle(hDisconnectForward);
 	CloseHandle(hErrorForward);
+	CloseHandle(hReadyStateChangeForward);
 	
 	RemoveFromArray(g_hChildReceiveForwards, iChildIndex);
 	RemoveFromArray(g_hChildErrorForwards, iChildIndex);
 	RemoveFromArray(g_hChildDisconnectForwards, iChildIndex);
+	RemoveFromArray(g_hChildReadyStateChangeForwards, iChildIndex);
 	
 	CloseHandle(hChildSocket);
 }
@@ -875,6 +1035,15 @@ bool:PreprocessFrame(iIndex, vFrame[WebsocketFrame], String:sPayLoad[])
 			// Just mirror it back
 			SendWebsocketFrame(iIndex, sPayLoad, vFrame);
 			SetArrayCell(g_hChildSocketReadyState, iIndex, State_Closing);
+			
+			new Handle:hReadyStateChangeForward = GetArrayCell(g_hChildReadyStateChangeForwards, iIndex);
+			
+			// Inform the other plugins of the change.
+			Call_StartForward(hReadyStateChangeForward);
+			Call_PushCell(WebsocketHandle:GetArrayCell(g_hChildSocketIndexes, iIndex));
+			Call_PushCell(GetArrayCell(g_hChildSocketReadyState, iIndex));
+			Call_Finish();
+			
 			CloseChildSocket(iIndex);
 			return true;
 		}
@@ -1062,6 +1231,15 @@ CloseConnection(iIndex, iCloseReason, String:sPayLoad[])
 	vFrame[CLOSE_REASON] = iCloseReason;
 	vFrame[PAYLOAD_LEN] = strlen(sPayLoad);
 	SendWebsocketFrame(iIndex, sPayLoad, vFrame);
+	SetArrayCell(g_hChildSocketReadyState, iIndex, State_Closing);
+	
+	new Handle:hReadyStateChangeForward = GetArrayCell(g_hChildReadyStateChangeForwards, iIndex);
+	
+	// Inform the other plugins of the change.
+	Call_StartForward(hReadyStateChangeForward);
+	Call_PushCell(WebsocketHandle:GetArrayCell(g_hChildSocketIndexes, iIndex));
+	Call_PushCell(GetArrayCell(g_hChildSocketReadyState, iIndex));
+	Call_Finish();
 }
 
 stock Debug(iDebugLevel, String:fmt[], any:...)
@@ -1113,11 +1291,16 @@ stock bool:IsPluginStillLoaded(Handle:plugin)
 {
 	new Handle:hIt = GetPluginIterator();
 	new Handle:hPlugin;
+	new bool:bPluginLoaded = false;
 	while(MorePlugins(hIt))
 	{
 		hPlugin = ReadPlugin(hIt);
 		if(hPlugin == plugin && GetPluginStatus(hPlugin) == Plugin_Running)
-			return true;
+		{
+			bPluginLoaded = true;
+			break;
+		}
 	}
-	return false;
+	CloseHandle(hIt);
+	return bPluginLoaded;
 }
