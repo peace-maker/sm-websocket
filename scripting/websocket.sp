@@ -795,7 +795,7 @@ public OnChildSocketReceive(Handle:socket, const String:receiveData[], const dat
 				Debug(1, "Plugin chose non-existant subprotocol. Offered: \"%s\" - Chosen: \"%s\"", sProtocol, sProtocolReturn);
 				Format(sProtocolReturn, sizeof(sProtocolReturn), "");
 			}
-			else
+			else if(strlen(sProtocol) > 0)
 				Format(sProtocolReturn, sizeof(sProtocolReturn), "\r\nSec-Websocket-Protocol: %s", sProtocol);
 			
 			// Prepare HTTP request
@@ -907,7 +907,7 @@ ParseFrame(vFrame[WebsocketFrame], const String:receiveDataLong[], const dataSiz
 	for(new i=0;i<dataSize;i++)
 	{
 		receiveData[i] = receiveDataLong[i]&0xff;
-		Debug(3, "%d (%c): %08b", i, receiveData[i], receiveData[i]);
+		Debug(3, "%d (%c): %08b", i, (receiveData[i]<32?' ':receiveData[i]), receiveData[i]);
 	}
 	
 	decl String:sByte[9];
@@ -953,9 +953,9 @@ ParseFrame(vFrame[WebsocketFrame], const String:receiveDataLong[], const dataSiz
 		iOffset += 4;
 	}
 	
+	new iPayLoad[vFrame[PAYLOAD_LEN]];
 	for(new i=iOffset,j=0;j<vFrame[PAYLOAD_LEN];i++,j++)
-		sPayLoad[j] = receiveData[i];
-	sPayLoad[vFrame[PAYLOAD_LEN]] = '\0';
+		iPayLoad[j] = receiveData[i];
 	
 	Debug(2, "dataSize: %d", dataSize);
 	Debug(2, "FIN: %d", vFrame[FIN]);
@@ -965,17 +965,13 @@ ParseFrame(vFrame[WebsocketFrame], const String:receiveDataLong[], const dataSiz
 	Debug(2, "OPCODE: %d", _:vFrame[OPCODE]);
 	Debug(2, "MASK: %d", vFrame[MASK]);
 	Debug(2, "PAYLOAD_LEN: %d", vFrame[PAYLOAD_LEN]);
-	Debug(2, "PAYLOAD(pre unmask): %s", sPayLoad);
 	
 	// Unmask
 	if(vFrame[MASK])
 	{
-		new String:sPayloadBuffer[vFrame[PAYLOAD_LEN]+1];
-		strcopy(sPayloadBuffer, vFrame[PAYLOAD_LEN]+1, sPayLoad);
-		strcopy(sPayLoad, vFrame[PAYLOAD_LEN]+1, "");
 		for(new i=0;i<vFrame[PAYLOAD_LEN];i++)
 		{
-			Format(sPayLoad, vFrame[PAYLOAD_LEN]+1, "%s%c", sPayLoad, sPayloadBuffer[i]^vFrame[MASKINGKEY][i%4]);
+			Format(sPayLoad, vFrame[PAYLOAD_LEN]+1, "%s%c", sPayLoad, iPayLoad[i]^vFrame[MASKINGKEY][i%4]);
 		}
 	}
 	
