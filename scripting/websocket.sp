@@ -1009,6 +1009,13 @@ bool:PreprocessFrame(iIndex, vFrame[WebsocketFrame], String:sPayLoad[])
 		return false;
 	}
 	
+	/*if(vFrame[RSV1] != 0 || vFrame[RSV2] != 0 || vFrame[RSV3] != 0)
+	{
+		LogError("One of the reservation bits is set. We don't support any extensions! (rsv1: %d rsv2: %d rsv3: %d)", vFrame[RSV1], vFrame[RSV2], vFrame[RSV3]);
+		CloseConnection(iIndex, 1003, "One of the reservation bits is set.");
+		return false;
+	}*/
+	
 	switch(vFrame[OPCODE])
 	{
 		case FrameType_Text:
@@ -1072,6 +1079,11 @@ bool:SendWebsocketFrame(iIndex, String:sPayLoad[], vFrame[WebsocketFrame])
 	new length = vFrame[PAYLOAD_LEN];
 	
 	Debug(1, "Preparing to send payload %s (%d)", sPayLoad, length);
+	
+	// Force RSV bits to 0
+	vFrame[RSV1] = 0;
+	vFrame[RSV2] = 0;
+	vFrame[RSV3] = 0;
 	
 	decl String:sFrame[length+14];
 	if(PackFrame(sPayLoad, sFrame, vFrame))
