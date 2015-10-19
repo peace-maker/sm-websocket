@@ -32,6 +32,8 @@ new String:g_sLog[PLATFORM_MAX_PATH];
 #define CHILD_READYSTATECALL 4
 #define CHILD_ARRAY_LENGTH 5
 
+#define FRAGMENT_MAX_LENGTH 32768
+
 // Handshake header parsing
 new Handle:g_hRegExKey;
 new Handle:g_hRegExProtocol;
@@ -55,6 +57,7 @@ new Handle:g_hChildSocketIndexes;
 new Handle:g_hChildSocketHost;
 new Handle:g_hChildSocketPort;
 new Handle:g_hChildSocketReadyState;
+new Handle:g_hChildSocketFragmentedPayload;
 new Handle:g_hChildErrorForwards;
 new Handle:g_hChildReceiveForwards;
 new Handle:g_hChildDisconnectForwards;
@@ -66,6 +69,7 @@ new g_iLastSocketIndex = 0;
 
 
 enum WebsocketFrameType {
+	FrameType_Continuation = 0,
 	FrameType_Text = 1,
 	FrameType_Binary = 2,
 	FrameType_Close = 8,
@@ -138,6 +142,7 @@ public OnPluginStart()
 	g_hChildSocketHost = CreateArray(ByteCountToCells(64));
 	g_hChildSocketPort = CreateArray();
 	g_hChildSocketReadyState = CreateArray();
+	g_hChildSocketFragmentedPayload = CreateArray();
 	
 	g_hMasterErrorForwards = CreateArray();
 	g_hMasterCloseForwards = CreateArray();
@@ -641,6 +646,10 @@ public OnSocketIncoming(Handle:socket, Handle:newSocket, const String:remoteIP[]
 	PushArrayCell(g_hChildSocketPort, remotePort);
 	PushArrayCell(g_hChildSocketPlugins, CreateArray(CHILD_ARRAY_LENGTH));
 	PushArrayCell(g_hChildSocketReadyState, State_Connecting);
+	new Handle:hFragmentedPayload = CreateArray(ByteCountToCells(FRAGMENT_MAX_LENGTH));
+	PushArrayCell(g_hChildSocketFragmentedPayload, hFragmentedPayload);
+	PushArrayCell(hFragmentedPayload, 0); // The first element will always be the payload length.
+	PushArrayCell(hFragmentedPayload, 0); // The second element is the payload type. (Even though we don't handle text and binary differently..)
 	
 	// Create the private forwards for this socket
 	new Handle:hReceiveForward = CreateForward(ET_Ignore, Param_Cell, Param_Cell, Param_String, Param_Cell, Param_Any);
@@ -827,14 +836,52 @@ public OnChildSocketReceive(Handle:socket, const String:receiveData[], const dat
 				new Handle:hReceiveForward = Handle:GetArrayCell(g_hChildReceiveForwards, iIndex);
 				Call_StartForward(hReceiveForward);
 				Call_PushCell(arg);
-				new WebsocketSendType:iType;
-				if(vFrame[OPCODE]==FrameType_Text)
-					iType = SendType_Text;
+				
+				// This is a fragmented message.
+				if(vFrame[OPCODE] == FrameType_Continuation)
+				{
+					new Handle:hFragmentedPayload = Handle:GetArrayCell(g_hChildSocketFragmentedPayload, iIndex);
+					new iPayloadLength = GetArrayCell(hFragmentedPayload, 0);
+					
+					new String:sConcatPayload[iPayloadLength];
+					new String:sPayloadPart[FRAGMENT_MAX_LENGTH];
+					new iSize = GetArraySize(hFragmentedPayload);
+					// Concat all the payload parts
+					// TODO: Make this binary safe? GetArrayArray vs. GetArrayString?
+					for(new i=2;i<iSize;i++)
+					{
+						GetArrayString(hFragmentedPayload, i, sPayloadPart, sizeof(sPayloadPart));
+						Format(sConcatPayload, iPayloadLength, "%s%s", sConcatPayload, sPayloadPart);
+					}
+					
+					new WebsocketSendType:iType;
+					if(WebsocketFrameType:GetArrayCell(hFragmentedPayload, 1) == FrameType_Text)
+						iType = SendType_Text;
+					else
+						iType = SendType_Binary;
+					Call_PushCell(iType);
+					
+					Call_PushString(sConcatPayload);
+					Call_PushCell(iPayloadLength);
+					
+					// Clear the fragment buffer
+					ClearArray(hFragmentedPayload);
+					PushArrayCell(hFragmentedPayload, 0); // length
+					PushArrayCell(hFragmentedPayload, 0); // opcode
+				}
+				// This is an unfragmented message.
 				else
-					iType = SendType_Binary;
-				Call_PushCell(iType);
-				Call_PushString(sPayLoad);
-				Call_PushCell(vFrame[PAYLOAD_LEN]);
+				{
+					new WebsocketSendType:iType;
+					if(vFrame[OPCODE] == FrameType_Text)
+						iType = SendType_Text;
+					else
+						iType = SendType_Binary;
+					Call_PushCell(iType);
+					Call_PushString(sPayLoad);
+					Call_PushCell(vFrame[PAYLOAD_LEN]);
+				}
+				
 				Call_Finish();
 			}
 		}
@@ -886,6 +933,8 @@ CloseChildSocket(iChildIndex, bool:bFireForward=true)
 	CloseHandle(hChildSocketPlugin);
 	RemoveFromArray(g_hChildSocketPlugins, iChildIndex);
 	RemoveFromArray(g_hChildSocketIndexes, iChildIndex);
+	CloseHandle(GetArrayCell(g_hChildSocketFragmentedPayload, iChildIndex));
+	RemoveFromArray(g_hChildSocketFragmentedPayload, iChildIndex);
 	
 	CloseHandle(hReceiveForward);
 	CloseHandle(hDisconnectForward);
@@ -1002,11 +1051,62 @@ ParseFrame(vFrame[WebsocketFrame], const String:receiveDataLong[], const dataSiz
 
 bool:PreprocessFrame(iIndex, vFrame[WebsocketFrame], String:sPayLoad[])
 {
-	if(vFrame[FIN] != 1)
+	// This is a fragmented frame
+	if(vFrame[FIN] == 0)
 	{
-		LogError("Received fragmented frame from client. This hasn't been implemented yet.");
-		CloseConnection(iIndex, 1003, "Fragments not supported");
-		return false;
+		// This is a control frame. Those cannot be fragmented!
+		if(vFrame[OPCODE] >= FrameType_Close)
+		{
+			LogError("Received fragmented control frame. %d", vFrame[OPCODE]);
+			CloseConnection(iIndex, 1002, "Received fragmented control frame.");
+			return true;
+		}
+		
+		new Handle:hFragmentedPayload = Handle:GetArrayCell(g_hChildSocketFragmentedPayload, iIndex);
+		new iPayloadLength = GetArrayCell(hFragmentedPayload, 0);
+		
+		// This is the first frame of a serie of fragmented ones.
+		if(iPayloadLength == 0)
+		{
+			if(vFrame[OPCODE] == FrameType_Continuation)
+			{
+				LogError("Received first fragmented frame with opcode 0. The first fragment MUST have a different opcode set.");
+				CloseConnection(iIndex, 1002, "Received first fragmented frame with opcode 0. The first fragment MUST have a different opcode set.");
+				return true;
+			}
+			
+			// Remember which type of message this fragmented one is.
+			SetArrayCell(hFragmentedPayload, 1, vFrame[OPCODE]);
+		}
+		else
+		{
+			if(vFrame[OPCODE] != FrameType_Continuation)
+			{
+				LogError("Received second or later frame of fragmented message with opcode %d. opcode must be 0.", vFrame[OPCODE]);
+				CloseConnection(iIndex, 1002, "Received second or later frame of fragmented message with opcode other than 0. opcode must be 0.");
+				return true;
+			}
+		}
+		
+		// Keep track of the overall payload length of the fragmented message.
+		// This is used to create the buffer of the right size when passing it to the listening plugin.
+		iPayloadLength += vFrame[PAYLOAD_LEN];
+		SetArrayCell(hFragmentedPayload, 0, iPayloadLength);
+		
+		// This doesn't fit inside one array cell? Split it up.
+		if(vFrame[PAYLOAD_LEN] > FRAGMENT_MAX_LENGTH)
+		{
+			for(new i=0;i<vFrame[PAYLOAD_LEN];i+=FRAGMENT_MAX_LENGTH)
+			{
+				PushArrayString(hFragmentedPayload, sPayLoad[i]);
+			}
+		}
+		else
+		{
+			PushArrayString(hFragmentedPayload, sPayLoad);
+		}
+		
+		return true;
 	}
 	
 	/*if(vFrame[RSV1] != 0 || vFrame[RSV2] != 0 || vFrame[RSV3] != 0)
@@ -1016,8 +1116,44 @@ bool:PreprocessFrame(iIndex, vFrame[WebsocketFrame], String:sPayLoad[])
 		return false;
 	}*/
 	
+	// The FIN bit is set if we reach here.
 	switch(vFrame[OPCODE])
 	{
+		case FrameType_Continuation:
+		{
+			new Handle:hFragmentedPayload = Handle:GetArrayCell(g_hChildSocketFragmentedPayload, iIndex);
+			new iPayloadLength = GetArrayCell(hFragmentedPayload, 0);
+			new WebsocketFrameType:iOpcode = WebsocketFrameType:GetArrayCell(hFragmentedPayload, 1);
+			// We don't know what type of data that is.
+			if(iOpcode == FrameType_Continuation)
+			{
+				LogError("Received last frame of a series of fragmented ones without any fragments with payload first.");
+				CloseConnection(iIndex, 1002, "Received last frame of fragmented message without any fragments beforehand.");
+				return true;
+			}
+			
+			// Add the payload of the last frame to the buffer too.
+			
+			// Keep track of the overall payload length of the fragmented message.
+			// This is used to create the buffer of the right size when passing it to the listening plugin.
+			iPayloadLength += vFrame[PAYLOAD_LEN];
+			SetArrayCell(hFragmentedPayload, 0, iPayloadLength);
+			
+			// This doesn't fit inside one array cell? Split it up.
+			if(vFrame[PAYLOAD_LEN] > FRAGMENT_MAX_LENGTH)
+			{
+				for(new i=0;i<vFrame[PAYLOAD_LEN];i+=FRAGMENT_MAX_LENGTH)
+				{
+					PushArrayString(hFragmentedPayload, sPayLoad[i]);
+				}
+			}
+			else
+			{
+				PushArrayString(hFragmentedPayload, sPayLoad);
+			}
+			
+			return false;
+		}
 		case FrameType_Text:
 		{
 			return false;
