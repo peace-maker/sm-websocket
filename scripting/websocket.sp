@@ -20,17 +20,20 @@ new String:g_sLog[PLATFORM_MAX_PATH];
  */
 
 // Used in the g_hMasterSocketPlugins child arrays
-#define PLUGIN_HANDLE 0
-#define PLUGIN_ERRORCALLBACK 1
-#define PLUGIN_INCOMINGCALLBACK 2
-#define PLUGIN_CLOSECALLBACK 3
+enum MasterPluginCallbacks {
+	Handle:MPC_PluginHandle,
+	Function:MPC_ErrorCallback,
+	Function:MPC_IncomingCallback,
+	Function:MPC_CloseCallback
+}
 
-#define CHILD_PLUGINHANDLE 0
-#define CHILD_RECVCALL 1
-#define CHILD_DISCCALL 2
-#define CHILD_ERRCALL 3
-#define CHILD_READYSTATECALL 4
-#define CHILD_ARRAY_LENGTH 5
+enum ChildPluginCallbacks {
+	Handle:CPC_PluginHandle,
+	Function:CPC_ReceiveCallback,
+	Function:CPC_DisconnectCallback,
+	Function:CPC_ErrorCallback,
+	Function:CPC_ReadystateCallback
+}
 
 #define FRAGMENT_MAX_LENGTH 32768
 
@@ -114,7 +117,7 @@ public APLRes:AskPluginLoad2(Handle:myself, bool:late, String:error[], err_max)
 
 public OnPluginStart()
 {
-	new Handle:hVersion = CreateConVar("sm_websocket_version", PLUGIN_VERSION, "", FCVAR_PLUGIN|FCVAR_NOTIFY|FCVAR_REPLICATED|FCVAR_DONTRECORD);
+	new Handle:hVersion = CreateConVar("sm_websocket_version", PLUGIN_VERSION, "", FCVAR_NOTIFY|FCVAR_REPLICATED|FCVAR_DONTRECORD);
 	if(hVersion != INVALID_HANDLE)
 		SetConVarString(hVersion, PLUGIN_VERSION);
 	
@@ -166,7 +169,7 @@ public OnPluginEnd()
 public Native_Websocket_Open(Handle:plugin, numParams)
 {
 	new iSize = GetArraySize(g_hMasterSocketPlugins);
-	new Handle:hMasterSocketPlugins, aPluginInfo[4];
+	new Handle:hMasterSocketPlugins, aPluginInfo[MasterPluginCallbacks];
 	
 	// Currently only one websocket per plugin is supported.
 	new iPluginCount;
@@ -176,8 +179,8 @@ public Native_Websocket_Open(Handle:plugin, numParams)
 		iPluginCount = GetArraySize(hMasterSocketPlugins);
 		for(new p=0;p<iPluginCount;p++)
 		{
-			GetArrayArray(hMasterSocketPlugins, p, aPluginInfo, 4);
-			if(Handle:aPluginInfo[PLUGIN_HANDLE] == plugin)
+			GetArrayArray(hMasterSocketPlugins, p, aPluginInfo[0], _:MasterPluginCallbacks);
+			if(aPluginInfo[MPC_PluginHandle] == plugin)
 			{
 				ThrowNativeError(SP_ERROR_NATIVE, "Only one websocket per plugin allowed. You already got one open.");
 				return _:INVALID_WEBSOCKET_HANDLE;
@@ -269,34 +272,34 @@ public Native_Websocket_Open(Handle:plugin, numParams)
 	}
 	
 	// Add him to our private incoming connections forward for this socket
-	new Function:fIncomingCallback = Function:GetNativeCell(3);
+	new Function:fIncomingCallback = GetNativeFunction(3);
 	if(!AddToForward(hIncomingForward, plugin, fIncomingCallback))
 		LogError("Unable to add plugin to incoming callback");
 	
 	// Add him to our private error forward for this socket
-	new Function:fErrorCallback = Function:GetNativeCell(4);
+	new Function:fErrorCallback = GetNativeFunction(4);
 	if(!AddToForward(hErrorForward, plugin, fErrorCallback))
 		LogError("Unable to add plugin to error callback");
 	
 	// Add him to our private close forward for this socket
-	new Function:fCloseCallback = Function:GetNativeCell(5);
+	new Function:fCloseCallback = GetNativeFunction(5);
 	if(!AddToForward(hCloseForward, plugin, fCloseCallback))
 		LogError("Unable to add plugin to close callback");
 	
 	// Remember, that this plugin is using this socket. Required to determine, if we can close the socket, if no plugins are using it anymore.
 	if(iIndex >= iSize)
 	{
-		hMasterSocketPlugins = CreateArray(4);
+		hMasterSocketPlugins = CreateArray(_:MasterPluginCallbacks);
 		PushArrayCell(g_hMasterSocketPlugins, hMasterSocketPlugins);
 	}
 	else
 		hMasterSocketPlugins = GetArrayCell(g_hMasterSocketPlugins, iIndex);
 	
-	aPluginInfo[PLUGIN_HANDLE] = _:plugin;
-	aPluginInfo[PLUGIN_ERRORCALLBACK] = _:fErrorCallback;
-	aPluginInfo[PLUGIN_INCOMINGCALLBACK] = _:fIncomingCallback;
-	aPluginInfo[PLUGIN_CLOSECALLBACK] = _:fCloseCallback;
-	PushArrayArray(hMasterSocketPlugins, aPluginInfo, 4);
+	aPluginInfo[MPC_PluginHandle] = plugin;
+	aPluginInfo[MPC_ErrorCallback] = fErrorCallback;
+	aPluginInfo[MPC_IncomingCallback] = fIncomingCallback;
+	aPluginInfo[MPC_CloseCallback] = fCloseCallback;
+	PushArrayArray(hMasterSocketPlugins, aPluginInfo[0], _:MasterPluginCallbacks);
 	
 	return _:iPseudoHandle;
 }
@@ -347,48 +350,48 @@ public Native_Websocket_HookChild(Handle:plugin, numParams)
 	// Did this plugin already hook the child socket? Replace callbacks!
 	new Handle:hChildSocketPlugin = Handle:GetArrayCell(g_hChildSocketPlugins, iChildIndex);
 	new iPluginCount = GetArraySize(hChildSocketPlugin);
-	new any:aPluginInfo[CHILD_ARRAY_LENGTH];
+	new aPluginInfo[ChildPluginCallbacks];
 	new iPluginInfoIndex = -1;
 	for(new p=0;p<iPluginCount;p++)
 	{
-		GetArrayArray(hChildSocketPlugin, p, aPluginInfo, CHILD_ARRAY_LENGTH);
-		if(plugin == Handle:aPluginInfo[CHILD_PLUGINHANDLE])
+		GetArrayArray(hChildSocketPlugin, p, aPluginInfo[0], _:ChildPluginCallbacks);
+		if(plugin == aPluginInfo[CPC_PluginHandle])
 		{
 			iPluginInfoIndex = p;
 			// Only remove, if there are already callbacks set. This could happen, if ReadyStateChange was called before HookChild.
-			if(Function:aPluginInfo[CHILD_RECVCALL] != INVALID_FUNCTION)
+			if(aPluginInfo[CPC_ReceiveCallback] != INVALID_FUNCTION)
 			{
-				RemoveFromForward(hReceiveForward, Handle:aPluginInfo[CHILD_PLUGINHANDLE], Function:aPluginInfo[CHILD_RECVCALL]);
-				RemoveFromForward(hDisconnectForward, Handle:aPluginInfo[CHILD_PLUGINHANDLE], Function:aPluginInfo[CHILD_DISCCALL]);
-				RemoveFromForward(hErrorForward, Handle:aPluginInfo[CHILD_PLUGINHANDLE], Function:aPluginInfo[CHILD_ERRCALL]);
+				RemoveFromForward(hReceiveForward, aPluginInfo[CPC_PluginHandle], aPluginInfo[CPC_ReceiveCallback]);
+				RemoveFromForward(hDisconnectForward, aPluginInfo[CPC_PluginHandle], aPluginInfo[CPC_DisconnectCallback]);
+				RemoveFromForward(hErrorForward, aPluginInfo[CPC_PluginHandle], aPluginInfo[CPC_ErrorCallback]);
 				break;
 			}
 		}
 	}
 	
-	aPluginInfo[CHILD_RECVCALL] = GetNativeCell(2);
-	aPluginInfo[CHILD_DISCCALL] = GetNativeCell(3);
-	aPluginInfo[CHILD_ERRCALL] = GetNativeCell(4);
+	aPluginInfo[CPC_ReceiveCallback] = GetNativeFunction(2);
+	aPluginInfo[CPC_DisconnectCallback] = GetNativeFunction(3);
+	aPluginInfo[CPC_ErrorCallback] = GetNativeFunction(4);
 	
 	// This is the first call to a hooking function on this socket for this plugin.
 	if(iPluginInfoIndex == -1)
 	{
 		// Store this plugin's callbacks to be able to remove them from the forward by the time the child socket disconnects
-		aPluginInfo[CHILD_PLUGINHANDLE] = _:plugin;
-		aPluginInfo[CHILD_READYSTATECALL] = _:INVALID_FUNCTION;
+		aPluginInfo[CPC_PluginHandle] = plugin;
+		aPluginInfo[CPC_ReadystateCallback] = INVALID_FUNCTION;
 		
-		PushArrayArray(hChildSocketPlugin, aPluginInfo, CHILD_ARRAY_LENGTH);
+		PushArrayArray(hChildSocketPlugin, aPluginInfo[0], _:ChildPluginCallbacks);
 	// This plugin is already known.
 	} else {
-		SetArrayArray(hChildSocketPlugin, iPluginInfoIndex, aPluginInfo, CHILD_ARRAY_LENGTH);
+		SetArrayArray(hChildSocketPlugin, iPluginInfoIndex, aPluginInfo[0], _:ChildPluginCallbacks);
 	}
 	
 	// Add his callbacks to the private forwards
-	if(!AddToForward(hReceiveForward, Handle:aPluginInfo[CHILD_PLUGINHANDLE], Function:aPluginInfo[CHILD_RECVCALL]))
+	if(!AddToForward(hReceiveForward, aPluginInfo[CPC_PluginHandle], aPluginInfo[CPC_ReceiveCallback]))
 		LogError("Unable to add plugin to recv callback");
-	if(!AddToForward(hDisconnectForward, Handle:aPluginInfo[CHILD_PLUGINHANDLE], Function:aPluginInfo[CHILD_DISCCALL]))
+	if(!AddToForward(hDisconnectForward, aPluginInfo[CPC_PluginHandle], aPluginInfo[CPC_DisconnectCallback]))
 		LogError("Unable to add plugin to disc callback");
-	if(!AddToForward(hErrorForward, Handle:aPluginInfo[CHILD_PLUGINHANDLE], Function:aPluginInfo[CHILD_ERRCALL]))
+	if(!AddToForward(hErrorForward, aPluginInfo[CPC_PluginHandle], aPluginInfo[CPC_ErrorCallback]))
 		LogError("Unable to add plugin to err callback");
 	
 	return true;
@@ -411,42 +414,42 @@ public Native_Websocket_HookReadyStateChange(Handle:plugin, numParams)
 	// Check, if this plugin already hooked this socket.
 	new Handle:hChildSocketPlugin = Handle:GetArrayCell(g_hChildSocketPlugins, iChildIndex);
 	new iPluginCount = GetArraySize(hChildSocketPlugin);
-	new any:aPluginInfo[CHILD_ARRAY_LENGTH];
+	new aPluginInfo[ChildPluginCallbacks];
 	new iPluginInfoIndex = -1;
 	for(new p=0;p<iPluginCount;p++)
 	{
-		GetArrayArray(hChildSocketPlugin, p, aPluginInfo, CHILD_ARRAY_LENGTH);
-		if(plugin == Handle:aPluginInfo[CHILD_PLUGINHANDLE])
+		GetArrayArray(hChildSocketPlugin, p, aPluginInfo[0], _:ChildPluginCallbacks);
+		if(plugin == aPluginInfo[CPC_PluginHandle])
 		{
 			iPluginInfoIndex = p;
 			// Replace the callback, if we already stored one.
-			if(Function:aPluginInfo[CHILD_READYSTATECALL] != INVALID_FUNCTION)
+			if(aPluginInfo[CPC_ReadystateCallback] != INVALID_FUNCTION)
 			{
-				RemoveFromForward(hReadyStateChangeForward, Handle:aPluginInfo[CHILD_PLUGINHANDLE], Function:aPluginInfo[CHILD_READYSTATECALL]);
+				RemoveFromForward(hReadyStateChangeForward, aPluginInfo[CPC_PluginHandle], aPluginInfo[CPC_ReadystateCallback]);
 				break;
 			}
 		}
 	}
 	
 	// Save the function to call.
-	aPluginInfo[CHILD_READYSTATECALL] = Function:GetNativeCell(2);
+	aPluginInfo[CPC_ReadystateCallback] = GetNativeFunction(2);
 	
 	// This is the first call for a plugin to call a hooking function.
 	if(iPluginInfoIndex == -1)
 	{
-		aPluginInfo[CHILD_PLUGINHANDLE] = _:plugin;
-		aPluginInfo[CHILD_RECVCALL] = _:INVALID_FUNCTION;
-		aPluginInfo[CHILD_ERRCALL] = _:INVALID_FUNCTION;
-		aPluginInfo[CHILD_DISCCALL] = _:INVALID_FUNCTION;
+		aPluginInfo[CPC_PluginHandle] = plugin;
+		aPluginInfo[CPC_ReceiveCallback] = INVALID_FUNCTION;
+		aPluginInfo[CPC_ErrorCallback] = INVALID_FUNCTION;
+		aPluginInfo[CPC_DisconnectCallback] = INVALID_FUNCTION;
 		
-		PushArrayArray(hChildSocketPlugin, aPluginInfo, CHILD_ARRAY_LENGTH);
+		PushArrayArray(hChildSocketPlugin, aPluginInfo[0], _:ChildPluginCallbacks);
 	}
 	else
 	{
-		SetArrayArray(hChildSocketPlugin, iPluginInfoIndex, aPluginInfo, CHILD_ARRAY_LENGTH);
+		SetArrayArray(hChildSocketPlugin, iPluginInfoIndex, aPluginInfo[0], _:ChildPluginCallbacks);
 	}
 	
-	if(!AddToForward(hReadyStateChangeForward, Handle:aPluginInfo[CHILD_PLUGINHANDLE], Function:aPluginInfo[CHILD_READYSTATECALL]))
+	if(!AddToForward(hReadyStateChangeForward, aPluginInfo[CPC_PluginHandle], aPluginInfo[CPC_ReadystateCallback]))
 		LogError("Unable to add plugin to readystate change callback");
 	
 	return true;
@@ -485,22 +488,22 @@ public Native_Websocket_UnhookChild(Handle:plugin, numParams)
 	
 	new Handle:hChildSocketPlugin = GetArrayCell(g_hChildSocketPlugins, iChildIndex);
 	new iPluginCount = GetArraySize(hChildSocketPlugin);
-	new aPluginInfo[CHILD_ARRAY_LENGTH];
+	new aPluginInfo[ChildPluginCallbacks];
 	for(new p=0;p<iPluginCount;p++)
 	{
-		GetArrayArray(hChildSocketPlugin, p, aPluginInfo, CHILD_ARRAY_LENGTH);
-		if(Handle:aPluginInfo[CHILD_PLUGINHANDLE] == plugin)
+		GetArrayArray(hChildSocketPlugin, p, aPluginInfo[0], _:ChildPluginCallbacks);
+		if(aPluginInfo[CPC_PluginHandle] == plugin)
 		{
 			// Remove the caller from all forwards
-			if(Function:aPluginInfo[CHILD_RECVCALL] != INVALID_FUNCTION)
+			if(aPluginInfo[CPC_ReceiveCallback] != INVALID_FUNCTION)
 			{
-				RemoveFromForward(hReceiveForward, Handle:aPluginInfo[CHILD_PLUGINHANDLE], Function:aPluginInfo[CHILD_RECVCALL]);
-				RemoveFromForward(hDisconnectForward, Handle:aPluginInfo[CHILD_PLUGINHANDLE], Function:aPluginInfo[CHILD_DISCCALL]);
-				RemoveFromForward(hErrorForward, Handle:aPluginInfo[CHILD_PLUGINHANDLE], Function:aPluginInfo[CHILD_ERRCALL]);
+				RemoveFromForward(hReceiveForward, aPluginInfo[CPC_PluginHandle], aPluginInfo[CPC_ReceiveCallback]);
+				RemoveFromForward(hDisconnectForward, aPluginInfo[CPC_PluginHandle], aPluginInfo[CPC_DisconnectCallback]);
+				RemoveFromForward(hErrorForward, aPluginInfo[CPC_PluginHandle], aPluginInfo[CPC_ErrorCallback]);
 			}
 			// Did this plugin call Websocket_HookReadyStateChange?
-			if(Function:aPluginInfo[CHILD_READYSTATECALL] != INVALID_FUNCTION)
-				RemoveFromForward(hReadyStateChangeForward, Handle:aPluginInfo[CHILD_PLUGINHANDLE], Function:aPluginInfo[CHILD_READYSTATECALL]);
+			if(aPluginInfo[CPC_ReadystateCallback] != INVALID_FUNCTION)
+				RemoveFromForward(hReadyStateChangeForward, aPluginInfo[CPC_PluginHandle], aPluginInfo[CPC_ReadystateCallback]);
 			RemoveFromArray(hChildSocketPlugin, p);
 			break;
 		}
@@ -576,19 +579,19 @@ CloseMasterSocket(iIndex, bool:bError = false, errorType=-1, errorNum=-1)
 		// Loop through all plugins using this socket
 		new Handle:hPlugins = GetArrayCell(g_hMasterSocketPlugins, iIndex);
 		new iPluginCount = GetArraySize(hPlugins);
-		new aPluginInfo[4];
+		new aPluginInfo[MasterPluginCallbacks];
 		// This master socket is gone, remove forward
 		for(new p=0;p<iPluginCount;p++)
 		{
-			GetArrayArray(hPlugins, p, aPluginInfo, 4);
+			GetArrayArray(hPlugins, p, aPluginInfo[0], _:MasterPluginCallbacks);
 			
-			if(!IsPluginStillLoaded(Handle:aPluginInfo[PLUGIN_HANDLE]))
+			if(!IsPluginStillLoaded(aPluginInfo[MPC_PluginHandle]))
 				continue;
 			
 			// Remove it from forwards.
-			RemoveFromForward(hErrorForward, Handle:aPluginInfo[PLUGIN_HANDLE], Function:aPluginInfo[PLUGIN_ERRORCALLBACK]);
-			RemoveFromForward(hIncomingForward, Handle:aPluginInfo[PLUGIN_HANDLE], Function:aPluginInfo[PLUGIN_INCOMINGCALLBACK]);
-			RemoveFromForward(hCloseForward, Handle:aPluginInfo[PLUGIN_HANDLE], Function:aPluginInfo[PLUGIN_CLOSECALLBACK]);
+			RemoveFromForward(hErrorForward, aPluginInfo[MPC_PluginHandle], aPluginInfo[MPC_ErrorCallback]);
+			RemoveFromForward(hIncomingForward, aPluginInfo[MPC_PluginHandle], aPluginInfo[MPC_IncomingCallback]);
+			RemoveFromForward(hCloseForward, aPluginInfo[MPC_PluginHandle], aPluginInfo[MPC_CloseCallback]);
 		}
 		CloseHandle(hPlugins);
 	}
@@ -644,7 +647,7 @@ public OnSocketIncoming(Handle:socket, Handle:newSocket, const String:remoteIP[]
 	PushArrayCell(g_hChildSocketIndexes, iPseudoChildHandle);
 	PushArrayString(g_hChildSocketHost, remoteIP);
 	PushArrayCell(g_hChildSocketPort, remotePort);
-	PushArrayCell(g_hChildSocketPlugins, CreateArray(CHILD_ARRAY_LENGTH));
+	PushArrayCell(g_hChildSocketPlugins, CreateArray(_:ChildPluginCallbacks));
 	PushArrayCell(g_hChildSocketReadyState, State_Connecting);
 	new Handle:hFragmentedPayload = CreateArray(ByteCountToCells(FRAGMENT_MAX_LENGTH));
 	PushArrayCell(g_hChildSocketFragmentedPayload, hFragmentedPayload);
@@ -913,21 +916,21 @@ CloseChildSocket(iChildIndex, bool:bFireForward=true)
 	RemoveFromArray(g_hChildSocketReadyState, iChildIndex);
 	new Handle:hChildSocketPlugin = GetArrayCell(g_hChildSocketPlugins, iChildIndex);
 	new iPluginCount = GetArraySize(hChildSocketPlugin);
-	new aPluginInfo[CHILD_ARRAY_LENGTH];
+	new aPluginInfo[ChildPluginCallbacks];
 	for(new p=0;p<iPluginCount;p++)
 	{
-		GetArrayArray(hChildSocketPlugin, p, aPluginInfo, CHILD_ARRAY_LENGTH);
-		if(!IsPluginStillLoaded(Handle:aPluginInfo[CHILD_PLUGINHANDLE]))
+		GetArrayArray(hChildSocketPlugin, p, aPluginInfo[0], _:ChildPluginCallbacks);
+		if(!IsPluginStillLoaded(aPluginInfo[CPC_PluginHandle]))
 			continue;
-		if(Function:aPluginInfo[CHILD_RECVCALL] != INVALID_FUNCTION)
+		if(aPluginInfo[CPC_ReceiveCallback] != INVALID_FUNCTION)
 		{
-			RemoveFromForward(hReceiveForward, Handle:aPluginInfo[CHILD_PLUGINHANDLE], Function:aPluginInfo[CHILD_RECVCALL]);
-			RemoveFromForward(hDisconnectForward, Handle:aPluginInfo[CHILD_PLUGINHANDLE], Function:aPluginInfo[CHILD_DISCCALL]);
-			RemoveFromForward(hErrorForward, Handle:aPluginInfo[CHILD_PLUGINHANDLE], Function:aPluginInfo[CHILD_ERRCALL]);
+			RemoveFromForward(hReceiveForward, aPluginInfo[CPC_PluginHandle], aPluginInfo[CPC_ReceiveCallback]);
+			RemoveFromForward(hDisconnectForward, aPluginInfo[CPC_PluginHandle], aPluginInfo[CPC_DisconnectCallback]);
+			RemoveFromForward(hErrorForward, aPluginInfo[CPC_PluginHandle], aPluginInfo[CPC_ErrorCallback]);
 		}
-		if(Function:aPluginInfo[CHILD_READYSTATECALL] != INVALID_FUNCTION)
+		if(aPluginInfo[CPC_ReadystateCallback] != INVALID_FUNCTION)
 		{
-			RemoveFromForward(hReadyStateChangeForward, Handle:aPluginInfo[CHILD_PLUGINHANDLE], Function:aPluginInfo[CHILD_READYSTATECALL]);
+			RemoveFromForward(hReadyStateChangeForward, aPluginInfo[CPC_PluginHandle], aPluginInfo[CPC_ReadystateCallback]);
 		}
 	}
 	CloseHandle(hChildSocketPlugin);
