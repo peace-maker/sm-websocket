@@ -45,9 +45,10 @@ functag WebsocketCloseCB public(WebsocketHandle:websocket);
  * @param String	remoteIP		The remote IP
  * @param cell_t	remotePort	The remote port
  * @param String	protocols 	The subprotocols the client supports seperated by commas. You have to choose one of the list, so "protocols" is only that one protocol.
+ * @param String	getPath 		The GET path transmitted upon connection by the client.
  * @noreturn
  */
-functag WebsocketIncomingCB Action:public(WebsocketHandle:websocket, WebsocketHandle:newWebsocket, const String:remoteIP[], remotePort, String:protocols[256]);
+functag WebsocketIncomingCB Action:public(WebsocketHandle:websocket, WebsocketHandle:newWebsocket, const String:remoteIP[], remotePort, String:protocols[256], String:getPath[2000]);
 
 /**
  * triggered if a websocket receives data
@@ -144,7 +145,7 @@ native Websocket_UnhookChild(WebsocketHandle:childwebsocket);
 /**
  * Closes a listening master socket, created with Websocket_Open.
  * Note: The socket will still be open, if there are more plugins using it.
- * 
+ *
  * Call this in OnPluginEnd()!
  *
  * @param websocket    The master websocket
@@ -152,7 +153,7 @@ native Websocket_UnhookChild(WebsocketHandle:childwebsocket);
  */
 native Websocket_Close(WebsocketHandle:websocket);
 
-public SharedPlugin:__pl_websocket = 
+public SharedPlugin:__pl_websocket =
 {
 	name = "websocket",
 	file = "websocket.smx",
