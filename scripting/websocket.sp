@@ -7,7 +7,7 @@
 #include <base64>
 #include <sha1>
 
-#define PLUGIN_VERSION "1.2.1"
+#define PLUGIN_VERSION "1.2"
 
 #define DEBUG 0
 #if DEBUG > 0
