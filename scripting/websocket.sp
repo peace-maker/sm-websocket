@@ -7,7 +7,7 @@
 #include <base64>
 #include <sha1>
 
-#define PLUGIN_VERSION "1.2"
+#define PLUGIN_VERSION "1.2.1"
 
 #define DEBUG 0
 #if DEBUG > 0
@@ -36,9 +36,11 @@ enum ChildPluginCallbacks {
 }
 
 #define FRAGMENT_MAX_LENGTH 32768
+#define URL_MAX_LENGTH 2000
 
 // Handshake header parsing
 new Handle:g_hRegExKey;
+new Handle:g_hRegExPath;
 new Handle:g_hRegExProtocol;
 
 // Array of all master sockets we're listening on
@@ -127,6 +129,11 @@ public OnPluginStart()
 	if(g_hRegExKey == INVALID_HANDLE)
 	{
 		SetFailState("Can't compile Sec-WebSocket-Key regex: %s (%d)", sError, _:iRegExError);
+	}
+	g_hRegExPath = CompileRegex("GET (.*)( HTTP/1.\\d)\r\n", 0, sError, sizeof(sError), iRegExError);
+	if(g_hRegExPath == INVALID_HANDLE)
+	{
+		SetFailState("Can't compile GET-Path regex: %s (%d)", sError, _:iRegExError);
 	}
 	g_hRegExProtocol = CompileRegex("Sec-WebSocket-Protocol: (.*)\r\n", 0, sError, sizeof(sError), iRegExError);
 	if(g_hRegExProtocol == INVALID_HANDLE)
@@ -248,7 +255,7 @@ public Native_Websocket_Open(Handle:plugin, numParams)
 		iPseudoHandle = ++g_iLastSocketIndex;
 		PushArrayCell(g_hMasterSocketIndexes, iPseudoHandle);
 		// Create private forwards for this socket
-		hIncomingForward = CreateForward(ET_Event, Param_Cell, Param_Cell, Param_String, Param_Cell, Param_String);
+		hIncomingForward = CreateForward(ET_Event, Param_Cell, Param_Cell, Param_String, Param_Cell, Param_String, Param_String);
 		PushArrayCell(g_hMasterIncomingForwards, hIncomingForward);
 		hErrorForward = CreateForward(ET_Ignore, Param_Cell, Param_Cell, Param_Cell);
 		PushArrayCell(g_hMasterErrorForwards, hErrorForward);
@@ -729,7 +736,7 @@ public OnChildSocketReceive(Handle:socket, const String:receiveData[], const dat
 				CloseChildSocket(iIndex);
 				return;
 			}
-			new String:sKey[256];
+			decl String:sKey[256];
 			if(!GetRegexSubString(g_hRegExKey, 1, sKey, sizeof(sKey)))
 			{
 				LogError("Failed to extract security key.");
@@ -747,7 +754,7 @@ public OnChildSocketReceive(Handle:socket, const String:receiveData[], const dat
 			Debug(2, "ResponseKey: %s", sResponseKey);
 			
 			iSubStrings = MatchRegex(g_hRegExProtocol, receiveData, iRegexError);
-			new String:sProtocol[256];
+			decl String:sProtocol[256];
 			if(iSubStrings != -1)
 			{
 				if(!GetRegexSubString(g_hRegExProtocol, 1, sProtocol, sizeof(sProtocol)))
@@ -759,6 +766,13 @@ public OnChildSocketReceive(Handle:socket, const String:receiveData[], const dat
 					return;*/
 				}
 			}
+			
+			decl String:sPath[URL_MAX_LENGTH];
+			
+			// Get the key
+			iSubStrings = MatchRegex(g_hRegExPath, receiveData, iRegexError);
+			if(iSubStrings == -1 || !GetRegexSubString(g_hRegExPath, 1, sPath, sizeof(sPath)))
+				sPath = "";
 			
 			// Inform plugins, there's an incoming request 
 			new iMasterIndex = GetArrayCell(g_hChildsMasterSockets, iIndex);
@@ -775,6 +789,7 @@ public OnChildSocketReceive(Handle:socket, const String:receiveData[], const dat
 			new String:sProtocolReturn[256];
 			strcopy(sProtocolReturn, sizeof(sProtocolReturn), sProtocol);
 			Call_PushStringEx(sProtocolReturn, sizeof(sProtocolReturn), SM_PARAM_STRING_UTF8, SM_PARAM_COPYBACK);
+			Call_PushString(sPath);
 			
 			new Action:iResult;
 			Call_Finish(iResult);
