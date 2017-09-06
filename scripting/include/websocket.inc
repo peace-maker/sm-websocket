@@ -48,7 +48,11 @@ functag WebsocketCloseCB public(WebsocketHandle:websocket);
  * @param String	getPath 		The GET path transmitted upon connection by the client.
  * @noreturn
  */
-functag WebsocketIncomingCB Action:public(WebsocketHandle:websocket, WebsocketHandle:newWebsocket, const String:remoteIP[], remotePort, String:protocols[256], String:getPath[2000]);
+funcenum WebsocketIncomingCB
+{
+	Action:public(WebsocketHandle:websocket, WebsocketHandle:newWebsocket, const String:remoteIP[], remotePort, String:protocols[256]),
+	Action:public(WebsocketHandle:websocket, WebsocketHandle:newWebsocket, const String:remoteIP[], remotePort, String:protocols[256], String:getPath[2000])
+};
 
 /**
  * triggered if a websocket receives data
