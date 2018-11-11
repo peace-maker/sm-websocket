@@ -3,12 +3,13 @@
 #endif
 #define _websocket_included
 
-#define INVALID_WEBSOCKET_HANDLE null
-
 //Compatibility for old plugins.
 #pragma deprecated Use WebSocket instead.
 #define WebsocketHandle WebSocket
 
+enum WebSocket {
+	INVALID_WEBSOCKET_HANDLE = 0
+}
 
 enum WebsocketReadyState {
 	State_Connecting = null,
@@ -81,8 +82,6 @@ methodmap WebSocket < Handle
  	// @noreturn
 	public native void Close();
 }
-
-
 
 /**
  * called if an unrecoverable error occured on the master socket
