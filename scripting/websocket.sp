@@ -737,7 +737,7 @@ public OnChildSocketReceive(Handle:socket, const String:receiveData[], const dat
 				return;
 			}
 			decl String:sKey[256];
-			if(strlen(sProtocol) < 1 || !GetRegexSubString(g_hRegExKey, 1, sKey, sizeof(sKey)))
+			if(!GetRegexSubString(g_hRegExKey, 1, sKey, sizeof(sKey)))
 			{
 				LogError("Failed to extract security key.");
 				CloseChildSocket(iIndex);
@@ -757,7 +757,7 @@ public OnChildSocketReceive(Handle:socket, const String:receiveData[], const dat
 			decl String:sProtocol[256];
 			if(iSubStrings != -1)
 			{
-				if(!GetRegexSubString(g_hRegExProtocol, 1, sProtocol, sizeof(sProtocol)))
+				if(strlen(sProtocol) < 1 || !GetRegexSubString(g_hRegExProtocol, 1, sProtocol, sizeof(sProtocol)))
 				{
 					Format(sProtocol, sizeof(sProtocol), "");
 					// It's not required to specify a subprotocol!
