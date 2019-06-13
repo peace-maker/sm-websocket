@@ -737,7 +737,7 @@ public OnChildSocketReceive(Handle:socket, const String:receiveData[], const dat
 				return;
 			}
 			decl String:sKey[256];
-			if(!GetRegexSubString(g_hRegExKey, 1, sKey, sizeof(sKey)))
+			if(strlen(sProtocol) < 1 || !GetRegexSubString(g_hRegExKey, 1, sKey, sizeof(sKey)))
 			{
 				LogError("Failed to extract security key.");
 				CloseChildSocket(iIndex);
