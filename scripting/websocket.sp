@@ -730,7 +730,7 @@ public OnChildSocketReceive(Handle:socket, const String:receiveData[], const dat
 			new RegexError:iRegexError;
 			// Get the key
 			new iSubStrings = MatchRegex(g_hRegExKey, receiveData, iRegexError);
-			if(iSubStrings == -1)
+			if(iSubStrings <= 0)
 			{
 				LogError("Can't find the Key in the http protocol upgrade request.");
 				CloseChildSocket(iIndex);
@@ -755,7 +755,7 @@ public OnChildSocketReceive(Handle:socket, const String:receiveData[], const dat
 			
 			iSubStrings = MatchRegex(g_hRegExProtocol, receiveData, iRegexError);
 			decl String:sProtocol[256];
-			if(iSubStrings != -1)
+			if(iSubStrings > 0)
 			{
 				if(!GetRegexSubString(g_hRegExProtocol, 1, sProtocol, sizeof(sProtocol)))
 				{
@@ -769,9 +769,9 @@ public OnChildSocketReceive(Handle:socket, const String:receiveData[], const dat
 			
 			decl String:sPath[URL_MAX_LENGTH];
 			
-			// Get the key
+			// Get the path
 			iSubStrings = MatchRegex(g_hRegExPath, receiveData, iRegexError);
-			if(iSubStrings == -1 || !GetRegexSubString(g_hRegExPath, 1, sPath, sizeof(sPath)))
+			if(iSubStrings <= 0 || !GetRegexSubString(g_hRegExPath, 1, sPath, sizeof(sPath)))
 				sPath = "";
 			
 			// Inform plugins, there's an incoming request 
